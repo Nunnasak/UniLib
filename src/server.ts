@@ -1,15 +1,14 @@
-import type { Server } from "node:http"
-import express from 'express';
-import { json } from 'body-parser';
-import cookieParser from 'cookie-parser';
+import type { Server } from "node:http";
+import express from "express";
+import cookieParser from "cookie-parser";
 
-import { connectDB, disconnectDB } from './config/db.ts';
+import { connectDB, disconnectDB } from "./config/db.ts";
 import { getPort } from "./config/env.ts";
-import authRoutes from "./routes/authRoute.ts"
+import authRoutes from "./routes/authRoute.ts";
 
 const app = express();
 const port = getPort();
-let server: Server | undefined ;
+let server: Server | undefined;
 let isShuttingDown = false;
 
 app.use(express.json());
@@ -20,8 +19,16 @@ app.use("/auth", authRoutes);
 const startServer = async (): Promise<void> => {
   await connectDB();
 
-  server = app.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
+  await new Promise<void>((resolve, reject) => {
+    server = app.listen(port, (error?: Error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      console.log(`Server is running on port ${port}`);
+      resolve();
+    });
   });
 };
 
@@ -38,8 +45,6 @@ const shutdown = async (exitCode: number): Promise<void> => {
   await disconnectDB();
   process.exit(exitCode);
 };
-
-startServer();
 
 process.on("unhandledRejection", (error: unknown) => {
   console.error("Unhandled rejection", error);
