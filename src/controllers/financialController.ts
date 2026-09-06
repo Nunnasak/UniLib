@@ -7,6 +7,12 @@ import { roundMoney } from "../utils/money.ts";
 type BorrowerParams = { borrowerId: string };
 type CreditKind = "PAYMENT" | "WAIVER";
 
+const canViewAccount = (
+  actor: NonNullable<Request["user"]>,
+  borrowerId: string,
+): boolean =>
+  actor.id === borrowerId || actor.role === "LIBRARIAN" || actor.role === "ADMIN";
+
 const getPositiveAmount = (body: unknown): number | null => {
   if (typeof body !== "object" || body === null) return null;
   const amount = (body as Record<string, unknown>).amount;
@@ -29,7 +35,7 @@ export const getFinancialAccount = async (
     res.status(401).json({ error: "Not authorized" });
     return;
   }
-  if (actor.id !== req.params.borrowerId && actor.role !== "LIBRARIAN" && actor.role !== "ADMIN") {
+  if (!canViewAccount(actor, req.params.borrowerId)) {
     res.status(403).json({ error: "Not allowed to view this financial account" });
     return;
   }
@@ -53,6 +59,50 @@ export const getFinancialAccount = async (
   });
 };
 
+export const listPayments = async (
+  req: Request<BorrowerParams>,
+  res: Response,
+): Promise<void> => {
+  const actor = req.user;
+  if (!actor) {
+    res.status(401).json({ error: "Not authorized" });
+    return;
+  }
+  if (!canViewAccount(actor, req.params.borrowerId)) {
+    res.status(403).json({ error: "Not allowed to view these payments" });
+    return;
+  }
+
+  const rawPage = typeof req.query.page === "string" ? Number(req.query.page) : 1;
+  const rawLimit = typeof req.query.limit === "string" ? Number(req.query.limit) : 20;
+  const page = Number.isInteger(rawPage) && rawPage > 0 ? rawPage : 1;
+  const limit = Math.min(Number.isInteger(rawLimit) && rawLimit > 0 ? rawLimit : 20, 100);
+  const account = await prisma.financialAccount.findUnique({
+    where: { borrowerId: req.params.borrowerId },
+    select: { id: true },
+  });
+  if (!account) {
+    res.status(200).json({ data: [], pagination: { page, limit, total: 0, totalPages: 0 } });
+    return;
+  }
+
+  const where = { accountId: account.id, type: "PAYMENT" as const };
+  const [total, payments] = await prisma.$transaction([
+    prisma.financialTransaction.count({ where }),
+    prisma.financialTransaction.findMany({
+      where,
+      include: { entries: true },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+  ]);
+  res.status(200).json({
+    data: payments,
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+  });
+};
+
 const recordCredit = async (
   req: Request<BorrowerParams>,
   res: Response,
@@ -63,13 +113,22 @@ const recordCredit = async (
     res.status(401).json({ error: "Not authorized" });
     return;
   }
-  if (actor.role !== "LIBRARIAN" && actor.role !== "ADMIN") {
-    res.status(403).json({ error: `Only library staff can record a ${kind.toLowerCase()}` });
+  const hasPermission =
+    kind === "WAIVER"
+      ? actor.role === "ADMIN"
+      : actor.role === "LIBRARIAN" || actor.role === "ADMIN";
+  if (!hasPermission) {
+    res.status(403).json({
+      error:
+        kind === "WAIVER"
+          ? "Only an administrator can approve a waiver"
+          : "Only library staff can record a payment",
+    });
     return;
   }
   const amount = getPositiveAmount(req.body);
   if (amount === null) {
-    res.status(400).json({ error: "amount must be a positive number with at most 2 decimal places" });
+    res.status(400).json({ error: "amount must be a positive number" });
     return;
   }
   const reason = getOptionalString(req.body, "reason");
@@ -108,6 +167,23 @@ const recordCredit = async (
           },
         },
         include: { entries: true },
+      });
+      await tx.auditLog.create({
+        data: {
+          actorId: actor.id,
+          action: kind === "WAIVER" ? "FINE_WAIVER_APPROVED" : "FINE_PAYMENT_RECORDED",
+          resourceType: "FinancialAccount",
+          resourceId: account.id,
+          outcome: "SUCCESS",
+          beforeData: { outstandingBalance: balance },
+          afterData: { outstandingBalance: Number(updated.outstandingBalance) },
+          metadata: {
+            borrowerId: req.params.borrowerId,
+            amount,
+            reason: reason ?? null,
+            transactionId: transaction.id,
+          },
+        },
       });
       return { transaction, outstandingBalance: updated.outstandingBalance };
     }, { isolationLevel: "Serializable" });

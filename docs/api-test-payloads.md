@@ -13,7 +13,8 @@ Postman/environment variables:
 
 ```text
 token             Borrower's JWT
-librarianToken    Librarian or administrator JWT
+librarianToken    Librarian JWT
+adminToken        Administrator JWT
 borrowerId        Borrower's user ID
 loanId            Loan ID returned by borrow
 reservationId     Reservation ID returned by create reservation
@@ -158,7 +159,15 @@ librarian or administrator may view another borrower's account. Each transaction
 contains separate ledger entries such as `LATE_FINE`, `DAMAGE_CHARGE`,
 `LOST_REPLACEMENT`, and `PROCESSING_FEE`.
 
-## 12. Record a payment
+## 12. List payment history
+
+`GET /financial-accounts/{{borrowerId}}/payments?page=1&limit=20`
+
+GET requests have no JSON body. This is the endpoint to use when retrieving
+payments; `GET` must not be sent to the payment-creation endpoint unless this
+listing route is intended.
+
+## 13. Record a payment
 
 `POST /financial-accounts/{{borrowerId}}/payments`
 
@@ -173,7 +182,7 @@ contains separate ledger entries such as `LATE_FINE`, `DAMAGE_CHARGE`,
 This endpoint requires `Authorization: Bearer {{librarianToken}}`. The amount
 cannot exceed the current outstanding balance.
 
-## 13. Record a waiver
+## 14. Record a waiver
 
 `POST /financial-accounts/{{borrowerId}}/waivers`
 
@@ -184,10 +193,12 @@ cannot exceed the current outstanding balance.
 }
 ```
 
-This endpoint requires `Authorization: Bearer {{librarianToken}}`. `reason` is
-required, and the amount cannot make the balance negative.
+This endpoint requires `Authorization: Bearer {{adminToken}}`. Librarians cannot
+approve waivers. `reason` is required, and the amount cannot make the balance
+negative. The API records the approving admin and timestamp in the immutable
+financial transaction and audit log.
 
-## 14. Record a debit adjustment
+## 15. Record a debit adjustment
 
 `POST /financial-accounts/{{borrowerId}}/adjustments`
 
@@ -201,7 +212,7 @@ required, and the amount cannot make the balance negative.
 
 Only an administrator may call this endpoint.
 
-## 15. Record a credit adjustment
+## 16. Record a credit adjustment
 
 `POST /financial-accounts/{{borrowerId}}/adjustments`
 
@@ -215,7 +226,35 @@ Only an administrator may call this endpoint.
 
 A credit adjustment cannot make the outstanding balance negative.
 
-## 16. Logout
+## 17. Search books
+
+`GET /books/search?isbn=978013&title=clean&author=martin&category=software&availability=AVAILABLE&page=1&limit=20&sortBy=title&sortOrder=asc`
+
+GET requests have no JSON body. Every search field is optional and supplied as a
+query parameter:
+
+```text
+isbn          Partial or complete ISBN
+title         Partial title, case-insensitive
+author        Partial author name, case-insensitive
+category      Partial category name, case-insensitive
+availability AVAILABLE, UNAVAILABLE, or ALL
+page          Positive integer; default 1
+limit         1-100; default 20 and capped at 100
+sortBy        title, isbn13, publicationYear, or createdAt
+sortOrder     asc or desc
+```
+
+Examples:
+
+```text
+GET /books/search?isbn=9780134494166
+GET /books/search?title=architecture&page=1&limit=10
+GET /books/search?author=martin&sortBy=publicationYear&sortOrder=desc
+GET /books/search?category=databases&availability=AVAILABLE
+```
+
+## 18. Logout
 
 `POST /auth/logout`
 
