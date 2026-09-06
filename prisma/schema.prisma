@@ -13,13 +13,32 @@ datasource db {
     provider = "postgresql"
 }
 
+enum UserRole {
+    STUDENT
+    LECTURER
+    LIBRARIAN
+    ADMIN
+}
+
+enum AccountStatus {
+    ACTIVE
+    DISABLED
+}
+
 model User {
-    id            String   @id @default(uuid())
-    username      String   @unique
+    id            String        @id @default(uuid())
+    universityId  String        @unique @db.VarChar(255)
+    fullName      String        @db.VarChar(255)
+    email         String        @unique @db.VarChar(320)
     password_hash String
-    createAt      DateTime @default(now())
+    role          UserRole
+    accountStatus AccountStatus @default(ACTIVE)
+    createAt      DateTime      @default(now()) @db.Timestamptz(3)
+    updateAt      DateTime      @updatedAt @db.Timestamptz(3)
 
     borrowRecords BorrowRecord[]
+
+    @@index([role, accountStatus])
 }
 
 model Book {
