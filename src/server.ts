@@ -36,7 +36,7 @@ const shutdown = async (exitCode: number): Promise<void> => {
   if (isShuttingDown) return;
   isShuttingDown = true;
 
-  if (server) {
+  if (server?.listening) {
     await new Promise<void>((resolve, reject) => {
       server?.close((error) => (error ? reject(error) : resolve()));
     });

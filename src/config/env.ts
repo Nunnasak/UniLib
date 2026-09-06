@@ -1,20 +1,34 @@
 export const getRequiredEnv = (name: string): string => {
-    const value = process.env[name];
+  const value = process.env[name];
 
-    if (!value) {
-        throw new Error(`Missing required environment variable: ${name}`);
-    }
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
 
-    return value;
+  return value;
+};
+
+const parsePort = (name: string, value: string): number => {
+  const port = Number(value);
+
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+    throw new Error(`${name} must be a valid port number; received: ${value}`);
+  }
+
+  return port;
+};
+
+export const getDatabaseUrl = (): string => {
+  const databaseUrl = new URL(getRequiredEnv("DATABASE_URL"));
+  const portOverride = process.env.DATABASE_PORT_OVERRIDE;
+
+  if (portOverride) {
+    databaseUrl.port = String(parsePort("DATABASE_PORT_OVERRIDE", portOverride));
+  }
+
+  return databaseUrl.toString();
 };
 
 export const getPort = (): number => {
-    const value = process.env.PORT ?? "3000";
-    const port = Number(value);
-
-    if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
-        throw new Error(`PORT must be a valid port number; received: ${value}`)
-    }
-
-    return port;
-}
+  return parsePort("PORT", process.env.PORT ?? "3000");
+};
