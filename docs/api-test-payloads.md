@@ -56,13 +56,6 @@ Authorization: Bearer {{token}}
 Content-Type: application/json
 ```
 
-Critical `POST` and `PATCH` operations also require a unique key. Reuse the same
-key only when retrying the exact same request:
-
-```text
-Idempotency-Key: {{$guid}}
-```
-
 The JWT cookie returned by the API can be used instead when the client maintains
 cookies automatically.
 
@@ -301,7 +294,7 @@ The server rotates the refresh token after every successful request.
 }
 ```
 
-Use `librarianToken` and an `Idempotency-Key`.
+Use `librarianToken`.
 
 ## 22. Current loans and loan history
 
@@ -335,7 +328,7 @@ records.
 }
 ```
 
-Use `adminToken` and an `Idempotency-Key`.
+Use `adminToken`.
 
 ## 25. Admin changes role or account status
 
@@ -348,7 +341,7 @@ Use `adminToken` and an `Idempotency-Key`.
 }
 ```
 
-Use `adminToken` and an `Idempotency-Key`. Existing history is preserved.
+Use `adminToken`. Existing history is preserved.
 
 ## 26. Admin views audit logs
 
@@ -398,7 +391,7 @@ GET /audit-logs?actorId={{userId}}&page=1&limit=50
 }
 ```
 
-All catalog mutations require `librarianToken` and an `Idempotency-Key`.
+All catalog mutations require `librarianToken`.
 
 ## 28. Librarian reports
 

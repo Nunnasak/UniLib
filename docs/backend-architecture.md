@@ -30,13 +30,6 @@ credits use database transactions. Circulation transactions use serializable
 isolation plus conditional status updates, so two application instances cannot
 successfully claim the same available copy.
 
-## Idempotency
-
-Critical mutation routes require an `Idempotency-Key` header. The key is scoped
-to actor and operation. A SHA-256 request fingerprint prevents reuse with a
-different payload. Completed responses are replayed for 24 hours; an in-progress
-duplicate receives `409 REQUEST_IN_PROGRESS`.
-
 ## Audit and history retention
 
 Critical actions write immutable append-only `audit_logs` records in the same
@@ -60,4 +53,4 @@ All error responses are normalized to:
 ```
 
 Validation uses `400`, authentication `401`, authorization `403`, missing
-resources `404`, and state/idempotency conflicts `409`.
+resources `404`, and business state or concurrency conflicts `409`.

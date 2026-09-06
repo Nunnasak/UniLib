@@ -102,7 +102,6 @@ paths:
       description: Student/Lecturer may borrow for self. Librarian supplies borrowerId. Admin is forbidden.
       parameters:
         - {$ref: '#/components/parameters/BookId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
         content:
@@ -145,7 +144,6 @@ paths:
       summary: Renew an own loan or process renewal as librarian
       parameters:
         - {$ref: '#/components/parameters/LoanId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
       responses:
         '200': {$ref: '#/components/responses/Ok'}
         '403': {$ref: '#/components/responses/Forbidden'}
@@ -157,7 +155,6 @@ paths:
       summary: Librarian processes return and damage assessment
       parameters:
         - {$ref: '#/components/parameters/LoanId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
         content:
@@ -178,7 +175,6 @@ paths:
       summary: Librarian confirms a lost copy and finalizes charges
       parameters:
         - {$ref: '#/components/parameters/LoanId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
       responses:
         '200': {$ref: '#/components/responses/Ok'}
         '403': {$ref: '#/components/responses/Forbidden'}
@@ -189,7 +185,6 @@ paths:
       summary: Create an own book-level reservation
       parameters:
         - {$ref: '#/components/parameters/BookId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
       responses:
         '201': {$ref: '#/components/responses/Created'}
         '403': {$ref: '#/components/responses/Forbidden'}
@@ -208,7 +203,6 @@ paths:
       summary: Cancel an own active reservation
       parameters:
         - {$ref: '#/components/parameters/ReservationId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
       responses:
         '200': {$ref: '#/components/responses/Ok'}
         '404': {$ref: '#/components/responses/NotFound'}
@@ -243,7 +237,6 @@ paths:
       summary: Librarian records a full or partial payment
       parameters:
         - {$ref: '#/components/parameters/BorrowerId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
         content:
@@ -260,7 +253,6 @@ paths:
       summary: Admin approves a full or partial fine waiver
       parameters:
         - {$ref: '#/components/parameters/BorrowerId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
         content:
@@ -279,7 +271,6 @@ paths:
       summary: Admin records a debit or credit adjustment
       parameters:
         - {$ref: '#/components/parameters/BorrowerId'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
         content:
@@ -310,7 +301,6 @@ paths:
     post:
       tags: [Administration]
       summary: Admin creates a managed user
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody:
         required: true
         content:
@@ -326,7 +316,6 @@ paths:
       summary: Admin changes profile, role or account status
       parameters:
         - {in: path, name: userId, required: true, schema: {type: string, format: uuid}}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
         content:
@@ -359,7 +348,6 @@ paths:
     post:
       tags: [Catalog]
       summary: Librarian creates a book record
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody:
         required: true
         content:
@@ -370,7 +358,7 @@ paths:
     patch:
       tags: [Catalog]
       summary: Librarian updates or deactivates a book record
-      parameters: [{$ref: '#/components/parameters/ResourceId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      parameters: [{$ref: '#/components/parameters/ResourceId'}]
       requestBody:
         required: true
         content:
@@ -389,7 +377,6 @@ paths:
     post:
       tags: [Catalog]
       summary: Librarian creates an author
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody:
         required: true
         content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
@@ -398,7 +385,7 @@ paths:
     patch:
       tags: [Catalog]
       summary: Librarian updates an author
-      parameters: [{$ref: '#/components/parameters/ResourceId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      parameters: [{$ref: '#/components/parameters/ResourceId'}]
       requestBody:
         required: true
         content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
@@ -415,7 +402,6 @@ paths:
     post:
       tags: [Catalog]
       summary: Librarian creates a category
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody:
         required: true
         content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
@@ -424,7 +410,7 @@ paths:
     patch:
       tags: [Catalog]
       summary: Librarian updates a category
-      parameters: [{$ref: '#/components/parameters/ResourceId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      parameters: [{$ref: '#/components/parameters/ResourceId'}]
       requestBody:
         required: true
         content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
@@ -433,7 +419,6 @@ paths:
     post:
       tags: [Catalog]
       summary: Librarian creates a physical copy
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody:
         required: true
         content:
@@ -444,7 +429,7 @@ paths:
     patch:
       tags: [Catalog]
       summary: Librarian updates a non-loaned copy status
-      parameters: [{$ref: '#/components/parameters/ResourceId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      parameters: [{$ref: '#/components/parameters/ResourceId'}]
       requestBody:
         required: true
         content:
@@ -483,7 +468,6 @@ components:
   parameters:
     Page: {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
     Limit: {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
-    IdempotencyKey: {in: header, name: Idempotency-Key, required: true, schema: {type: string, maxLength: 255}}
     BookId: {in: path, name: bookId, required: true, schema: {type: string, format: uuid}}
     LoanId: {in: path, name: loanId, required: true, schema: {type: string, format: uuid}}
     ReservationId: {in: path, name: reservationId, required: true, schema: {type: string, format: uuid}}
@@ -561,5 +545,5 @@ components:
       description: Resource not found
       content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
     Conflict:
-      description: Business state, concurrency or idempotency conflict
+      description: Business state or concurrency conflict
       content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}

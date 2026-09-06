@@ -25,12 +25,6 @@ enum AccountStatus {
   DISABLED
 }
 
-enum IdempotencyStatus {
-  PROCESSING
-  COMPLETED
-  FAILED
-}
-
 model User {
   id            String        @id @default(uuid()) @db.Uuid
   universityId  String        @unique @db.VarChar(255)
@@ -50,7 +44,6 @@ model User {
   reservations                 Reservation[]
   financialAccount             FinancialAccount?
   createdFinancialTransactions FinancialTransaction[]
-  idempotencyRequests          IdempotencyRequest[]
   auditLogs                    AuditLog[]
 
   @@index([role, accountStatus])
@@ -342,27 +335,6 @@ model FinancialEntry {
   @@index([transactionId])
   @@index([loanId, component])
   @@map("financial_entries")
-}
-
-model IdempotencyRequest {
-  id             String            @id @default(uuid()) @db.Uuid
-  actorId        String            @db.Uuid
-  operation      String            @db.VarChar(100)
-  idempotencyKey String            @db.VarChar(255)
-  requestHash    String            @db.VarChar(128)
-  status         IdempotencyStatus @default(PROCESSING)
-  responseStatus Int?
-  responseBody   Json?             @db.JsonB
-  resourceId     String?           @db.VarChar(255)
-  expiresAt      DateTime          @db.Timestamptz(3)
-  createdAt      DateTime          @default(now()) @db.Timestamptz(3)
-  updatedAt      DateTime          @updatedAt @db.Timestamptz(3)
-
-  actor User @relation(fields: [actorId], references: [id], onDelete: Restrict)
-
-  @@unique([actorId, operation, idempotencyKey])
-  @@index([expiresAt])
-  @@map("idempotency_requests")
 }
 
 enum AuditOutcome {

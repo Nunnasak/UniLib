@@ -29,7 +29,7 @@ Backend documentation:
 
 - API contract: `docs/openapi.yaml`
 - Request examples: `docs/api-test-payloads.md`
-- Role, authentication, idempotency and transaction design:
+- Role, authentication and transaction design:
   `docs/backend-architecture.md`
 - ER diagram: `docs/er-diagram.md`
 
