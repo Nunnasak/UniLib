@@ -1,8 +1,12 @@
 import type { Request, Response } from "express";
+import { createHash, randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 
 import { prisma } from "../config/db.ts";
 import { generateToken } from "../utils/generateToken.ts";
+import { getCurrentUser } from "./userController.ts";
+
+export { getCurrentUser };
 
 type BorrowerRole = "STUDENT" | "LECTURER";
 
@@ -17,6 +21,30 @@ type RegisterRequestBody = {
 type LoginRequestBody = {
   universityId: string;
   password: string;
+};
+
+const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+
+const hashRefreshToken = (token: string): string =>
+  createHash("sha256").update(token).digest("hex");
+
+const issueRefreshToken = async (userId: string, res: Response): Promise<string> => {
+  const refreshToken = randomBytes(48).toString("base64url");
+  await prisma.authSession.create({
+    data: {
+      userId,
+      refreshTokenHash: hashRefreshToken(refreshToken),
+      expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+    },
+  });
+  res.cookie("refreshToken", refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/auth",
+    maxAge: REFRESH_TOKEN_TTL_MS,
+  });
+  return refreshToken;
 };
 
 const isNonEmptyString = (value: unknown): value is string =>
@@ -90,6 +118,7 @@ export const register = async (req: Request, res: Response): Promise<void> => {
   });
 
   const token = generateToken(user.id, res);
+  const refreshToken = await issueRefreshToken(user.id, res);
 
   res.status(201).json({
     data: {
@@ -101,6 +130,7 @@ export const register = async (req: Request, res: Response): Promise<void> => {
         role: user.role,
       },
       token,
+      refreshToken,
     },
   });
 };
@@ -135,6 +165,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
   }
 
   const token = generateToken(user.id, res);
+  const refreshToken = await issueRefreshToken(user.id, res);
 
   res.status(200).json({
     data: {
@@ -146,14 +177,72 @@ export const login = async (req: Request, res: Response): Promise<void> => {
         role: user.role,
       },
       token,
+      refreshToken,
     },
   });
 };
 
-export const logout = async (_req: Request, res: Response): Promise<void> => {
+export const refresh = async (req: Request, res: Response): Promise<void> => {
+  const suppliedToken =
+    typeof req.cookies?.refreshToken === "string"
+      ? req.cookies.refreshToken
+      : typeof req.body?.refreshToken === "string"
+        ? req.body.refreshToken
+        : undefined;
+  if (!suppliedToken) {
+    res.status(401).json({ code: "REFRESH_TOKEN_REQUIRED", error: "Refresh token is required" });
+    return;
+  }
+  const session = await prisma.authSession.findUnique({
+    where: { refreshTokenHash: hashRefreshToken(suppliedToken) },
+    include: { user: true },
+  });
+  if (!session || session.revokedAt || session.expiresAt <= new Date() || session.user.accountStatus === "DISABLED") {
+    res.status(401).json({ code: "INVALID_REFRESH_TOKEN", error: "Refresh token is invalid or expired" });
+    return;
+  }
+
+  const replacement = randomBytes(48).toString("base64url");
+  await prisma.authSession.update({
+    where: { id: session.id },
+    data: {
+      refreshTokenHash: hashRefreshToken(replacement),
+      lastUsedAt: new Date(),
+      expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
+    },
+  });
+  res.cookie("refreshToken", replacement, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/auth",
+    maxAge: REFRESH_TOKEN_TTL_MS,
+  });
+  const token = generateToken(session.userId, res);
+  res.status(200).json({ data: { token, refreshToken: replacement } });
+};
+
+export const logout = async (req: Request, res: Response): Promise<void> => {
+  const refreshToken =
+    typeof req.cookies?.refreshToken === "string"
+      ? req.cookies.refreshToken
+      : typeof req.body?.refreshToken === "string"
+        ? req.body.refreshToken
+        : undefined;
+  if (refreshToken) {
+    await prisma.authSession.updateMany({
+      where: { refreshTokenHash: hashRefreshToken(refreshToken), revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+  }
   res.cookie("jwt", "", {
     httpOnly: true,
     expires: new Date(0),
+  });
+  res.cookie("refreshToken", "", {
+    httpOnly: true,
+    expires: new Date(0),
+    path: "/auth",
   });
 
   res.status(200).json({

@@ -1,0 +1,565 @@
+openapi: 3.1.0
+info:
+  title: UniLib Backend API
+  version: 1.0.0
+  description: Backend-only university library API. Business dates use Asia/Bangkok.
+  license: {name: ISC}
+servers:
+  - url: http://localhost:8000
+security:
+  - bearerAuth: []
+tags:
+  - {name: Authentication, description: Login, refresh-token lifecycle and current user}
+  - {name: Catalog, description: Book discovery and librarian catalog management}
+  - {name: Circulation, description: Borrowing, renewal, return and lost processing}
+  - {name: Reservations, description: FIFO reservations, holds and cancellation}
+  - {name: Finance, description: Fine ledger, payment, waiver and adjustment}
+  - {name: Administration, description: User governance and immutable audit access}
+  - {name: Reporting, description: Librarian operational and admin aggregate reports}
+paths:
+  /auth/register:
+    post:
+      tags: [Authentication]
+      security: []
+      summary: Register a student or lecturer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegisterRequest'}
+      responses:
+        '201': {$ref: '#/components/responses/Created'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /auth/login:
+    post:
+      tags: [Authentication]
+      security: []
+      summary: Login and issue access and rotating refresh tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [universityId, password]
+              properties:
+                universityId: {type: string}
+                password: {type: string, format: password}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      security: []
+      summary: Rotate refresh token and issue a new access token
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {refreshToken: {type: string}}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      security: []
+      summary: Revoke the supplied refresh session
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+  /auth/me:
+    get:
+      tags: [Authentication]
+      summary: Get the authenticated user's profile
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /books/search:
+    get:
+      tags: [Catalog]
+      summary: Search active books and availability
+      parameters:
+        - {in: query, name: isbn, schema: {type: string}}
+        - {in: query, name: title, schema: {type: string}}
+        - {in: query, name: author, schema: {type: string}}
+        - {in: query, name: category, schema: {type: string}}
+        - {in: query, name: availability, schema: {type: string, enum: [AVAILABLE, UNAVAILABLE, ALL], default: ALL}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {in: query, name: sortBy, schema: {type: string, enum: [title, isbn13, publicationYear, createdAt]}}
+        - {in: query, name: sortOrder, schema: {type: string, enum: [asc, desc]}}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+  /books/{bookId}/borrow:
+    post:
+      tags: [Circulation]
+      summary: Borrow a copy (self-service or librarian checkout)
+      description: Student/Lecturer may borrow for self. Librarian supplies borrowerId. Admin is forbidden.
+      parameters:
+        - {$ref: '#/components/parameters/BookId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [copyId]
+              properties:
+                copyId: {type: string, format: uuid}
+                borrowerId: {type: string, format: uuid, description: Required for librarian checkout}
+      responses:
+        '201': {$ref: '#/components/responses/Created'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /loans:
+    get:
+      tags: [Circulation]
+      summary: List own loans or librarian-visible loan records
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {in: query, name: status, schema: {type: string, enum: [ACTIVE, RETURNED, LOST]}}
+        - {in: query, name: borrowerId, schema: {type: string, format: uuid}, description: Librarian only}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /loans/{loanId}:
+    get:
+      tags: [Circulation]
+      summary: Get an own loan or a librarian-visible loan
+      parameters: [{$ref: '#/components/parameters/LoanId'}]
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /loans/{loanId}/renew:
+    post:
+      tags: [Circulation]
+      summary: Renew an own loan or process renewal as librarian
+      parameters:
+        - {$ref: '#/components/parameters/LoanId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /loans/{loanId}/return:
+    post:
+      tags: [Circulation]
+      summary: Librarian processes return and damage assessment
+      parameters:
+        - {$ref: '#/components/parameters/LoanId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [returnCondition]
+              properties:
+                returnCondition: {type: string, enum: [NORMAL, MINOR_DAMAGE, MAJOR_DAMAGE, UNUSABLE]}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /loans/{loanId}/confirm-lost:
+    post:
+      tags: [Circulation]
+      summary: Librarian confirms a lost copy and finalizes charges
+      parameters:
+        - {$ref: '#/components/parameters/LoanId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /books/{bookId}/reservations:
+    post:
+      tags: [Reservations]
+      summary: Create an own book-level reservation
+      parameters:
+        - {$ref: '#/components/parameters/BookId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '201': {$ref: '#/components/responses/Created'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /reservations:
+    get:
+      tags: [Reservations]
+      summary: List own reservations with queue position
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses: {'200': {$ref: '#/components/responses/Ok'}}
+  /reservations/{reservationId}/cancel:
+    post:
+      tags: [Reservations]
+      summary: Cancel an own active reservation
+      parameters:
+        - {$ref: '#/components/parameters/ReservationId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /reservations/books/{bookId}/queue:
+    get:
+      tags: [Reservations]
+      summary: Librarian views a book's hold and FIFO queue
+      parameters: [{$ref: '#/components/parameters/BookId'}]
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /financial-accounts/{borrowerId}:
+    get:
+      tags: [Finance]
+      summary: View own account or staff-authorized account
+      parameters: [{$ref: '#/components/parameters/BorrowerId'}]
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /financial-accounts/{borrowerId}/payments:
+    get:
+      tags: [Finance]
+      summary: View own or staff-authorized immutable payment history
+      parameters:
+        - {$ref: '#/components/parameters/BorrowerId'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses: {'200': {$ref: '#/components/responses/Ok'}}
+    post:
+      tags: [Finance]
+      summary: Librarian records a full or partial payment
+      parameters:
+        - {$ref: '#/components/parameters/BorrowerId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MoneyRequest'}
+      responses:
+        '201': {$ref: '#/components/responses/Created'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /financial-accounts/{borrowerId}/waivers:
+    post:
+      tags: [Finance]
+      summary: Admin approves a full or partial fine waiver
+      parameters:
+        - {$ref: '#/components/parameters/BorrowerId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: '#/components/schemas/MoneyRequest'}
+                - {type: object, required: [reason]}
+      responses:
+        '201': {$ref: '#/components/responses/Created'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /financial-accounts/{borrowerId}/adjustments:
+    post:
+      tags: [Finance]
+      summary: Admin records a debit or credit adjustment
+      parameters:
+        - {$ref: '#/components/parameters/BorrowerId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, direction, reason]
+              properties:
+                amount: {type: number, exclusiveMinimum: 0}
+                direction: {type: string, enum: [DEBIT, CREDIT]}
+                reason: {type: string, minLength: 1}
+      responses:
+        '201': {$ref: '#/components/responses/Created'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /users:
+    get:
+      tags: [Administration]
+      summary: Admin lists users; librarian searches borrowers only
+      parameters:
+        - {in: query, name: q, schema: {type: string}}
+        - {in: query, name: role, schema: {type: string, enum: [STUDENT, LECTURER, LIBRARIAN, ADMIN]}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [Administration]
+      summary: Admin creates a managed user
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ManagedUserRequest'}
+      responses:
+        '201': {$ref: '#/components/responses/Created'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /users/{userId}:
+    patch:
+      tags: [Administration]
+      summary: Admin changes profile, role or account status
+      parameters:
+        - {in: path, name: userId, required: true, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fullName: {type: string}
+                email: {type: string, format: email}
+                role: {type: string, enum: [STUDENT, LECTURER, LIBRARIAN, ADMIN]}
+                accountStatus: {type: string, enum: [ACTIVE, DISABLED]}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /audit-logs:
+    get:
+      tags: [Administration]
+      summary: Admin views immutable audit logs
+      parameters:
+        - {in: query, name: action, schema: {type: string}}
+        - {in: query, name: actorId, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {$ref: '#/components/responses/Ok'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /catalog/books:
+    post:
+      tags: [Catalog]
+      summary: Librarian creates a book record
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BookMutation'}
+      responses: {'201': {$ref: '#/components/responses/Created'}, '403': {$ref: '#/components/responses/Forbidden'}}
+  /catalog/books/{id}:
+    patch:
+      tags: [Catalog]
+      summary: Librarian updates or deactivates a book record
+      parameters: [{$ref: '#/components/parameters/ResourceId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses: {'200': {$ref: '#/components/responses/Ok'}, '403': {$ref: '#/components/responses/Forbidden'}}
+  /catalog/authors:
+    get:
+      tags: [Catalog]
+      summary: Librarian lists authors
+      parameters:
+        - {in: query, name: q, schema: {type: string}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses: {'200': {$ref: '#/components/responses/Ok'}, '403': {$ref: '#/components/responses/Forbidden'}}
+    post:
+      tags: [Catalog]
+      summary: Librarian creates an author
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
+      responses: {'201': {$ref: '#/components/responses/Created'}, '403': {$ref: '#/components/responses/Forbidden'}}
+  /catalog/authors/{id}:
+    patch:
+      tags: [Catalog]
+      summary: Librarian updates an author
+      parameters: [{$ref: '#/components/parameters/ResourceId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
+      responses: {'200': {$ref: '#/components/responses/Ok'}, '403': {$ref: '#/components/responses/Forbidden'}}
+  /catalog/categories:
+    get:
+      tags: [Catalog]
+      summary: Librarian lists categories
+      parameters:
+        - {in: query, name: q, schema: {type: string}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses: {'200': {$ref: '#/components/responses/Ok'}, '403': {$ref: '#/components/responses/Forbidden'}}
+    post:
+      tags: [Catalog]
+      summary: Librarian creates a category
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
+      responses: {'201': {$ref: '#/components/responses/Created'}, '403': {$ref: '#/components/responses/Forbidden'}}
+  /catalog/categories/{id}:
+    patch:
+      tags: [Catalog]
+      summary: Librarian updates a category
+      parameters: [{$ref: '#/components/parameters/ResourceId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
+      responses: {'200': {$ref: '#/components/responses/Ok'}, '403': {$ref: '#/components/responses/Forbidden'}}
+  /catalog/copies:
+    post:
+      tags: [Catalog]
+      summary: Librarian creates a physical copy
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CopyMutation'}
+      responses: {'201': {$ref: '#/components/responses/Created'}, '403': {$ref: '#/components/responses/Forbidden'}}
+  /catalog/copies/{id}:
+    patch:
+      tags: [Catalog]
+      summary: Librarian updates a non-loaned copy status
+      parameters: [{$ref: '#/components/parameters/ResourceId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties: {status: {type: string, enum: [AVAILABLE, MAINTENANCE, LOST, RETIRED]}}
+      responses: {'200': {$ref: '#/components/responses/Ok'}, '403': {$ref: '#/components/responses/Forbidden'}, '409': {$ref: '#/components/responses/Conflict'}}
+  /reports/overdue:
+    get:
+      tags: [Reporting]
+      summary: Librarian views paginated overdue loans
+      parameters: [{$ref: '#/components/parameters/Page'}, {$ref: '#/components/parameters/Limit'}]
+      responses: {'200': {$ref: '#/components/responses/Ok'}, '403': {$ref: '#/components/responses/Forbidden'}}
+  /reports/inventory:
+    get:
+      tags: [Reporting]
+      summary: Librarian views inventory status
+      parameters:
+        - {in: query, name: status, schema: {type: string, enum: [AVAILABLE, ON_LOAN, ON_HOLD, MAINTENANCE, LOST, RETIRED]}}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses: {'200': {$ref: '#/components/responses/Ok'}, '403': {$ref: '#/components/responses/Forbidden'}}
+  /reports/system-summary:
+    get:
+      tags: [Reporting]
+      summary: Admin views aggregate system, borrowing and fine statistics
+      responses: {'200': {$ref: '#/components/responses/Ok'}, '403': {$ref: '#/components/responses/Forbidden'}}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Page: {in: query, name: page, schema: {type: integer, minimum: 1, default: 1}}
+    Limit: {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
+    IdempotencyKey: {in: header, name: Idempotency-Key, required: true, schema: {type: string, maxLength: 255}}
+    BookId: {in: path, name: bookId, required: true, schema: {type: string, format: uuid}}
+    LoanId: {in: path, name: loanId, required: true, schema: {type: string, format: uuid}}
+    ReservationId: {in: path, name: reservationId, required: true, schema: {type: string, format: uuid}}
+    BorrowerId: {in: path, name: borrowerId, required: true, schema: {type: string, format: uuid}}
+    ResourceId: {in: path, name: id, required: true, schema: {type: string, format: uuid}}
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [universityId, fullName, email, password, role]
+      properties:
+        universityId: {type: string}
+        fullName: {type: string}
+        email: {type: string, format: email}
+        password: {type: string, format: password, minLength: 8}
+        role: {type: string, enum: [STUDENT, LECTURER]}
+    ManagedUserRequest:
+      type: object
+      required: [universityId, fullName, email, password, role]
+      properties:
+        universityId: {type: string}
+        fullName: {type: string}
+        email: {type: string, format: email}
+        password: {type: string, format: password, minLength: 8}
+        role: {type: string, enum: [STUDENT, LECTURER, LIBRARIAN, ADMIN]}
+    MoneyRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount: {type: number, exclusiveMinimum: 0}
+        reason: {type: string}
+        externalReference: {type: string}
+    BookMutation:
+      type: object
+      required: [isbn13, title, publisher, publicationYear, languageCode, authorIds, categoryIds]
+      properties:
+        isbn13: {type: string, minLength: 13, maxLength: 13}
+        title: {type: string}
+        description: {type: [string, 'null']}
+        publisher: {type: string}
+        publicationYear: {type: integer}
+        languageCode: {type: string}
+        authorIds: {type: array, minItems: 1, items: {type: string, format: uuid}}
+        categoryIds: {type: array, minItems: 1, items: {type: string, format: uuid}}
+    CopyMutation:
+      type: object
+      required: [bookId, barcode, acquisitionPrice, acquisitionDate]
+      properties:
+        bookId: {type: string, format: uuid}
+        barcode: {type: string}
+        acquisitionPrice: {type: number, minimum: 0}
+        acquisitionDate: {type: string, format: date}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string, example: COPY_NOT_AVAILABLE}
+            message: {type: string}
+  responses:
+    Ok: {description: Successful response}
+    Created: {description: Resource or transaction created}
+    BadRequest:
+      description: Validation error
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Unauthorized:
+      description: Missing or invalid authentication
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Forbidden:
+      description: Authenticated role is not authorized
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    NotFound:
+      description: Resource not found
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+    Conflict:
+      description: Business state, concurrency or idempotency conflict
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}

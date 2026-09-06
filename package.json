@@ -6,10 +6,11 @@
   "scripts": {
     "dev": "concurrently --kill-others-on-fail --names api,studio --prefix-colors cyan,magenta \"npm:dev:server\" \"npm:studio\"",
     "dev:server": "nodemon --exec node --env-file=.env ./src/server.ts",
+    "start": "node --env-file=.env ./src/server.ts",
     "studio": "prisma studio",
     "db:seed": "prisma db seed",
     "typecheck": "tsc --noEmit",
-    "postinstall": "prisma skills sync || exit 0"
+    "postinstall": "prisma generate"
   },
   "repository": {
     "type": "git",

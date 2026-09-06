@@ -116,7 +116,7 @@ const recordCredit = async (
   const hasPermission =
     kind === "WAIVER"
       ? actor.role === "ADMIN"
-      : actor.role === "LIBRARIAN" || actor.role === "ADMIN";
+      : actor.role === "LIBRARIAN";
   if (!hasPermission) {
     res.status(403).json({
       error:
@@ -191,11 +191,11 @@ const recordCredit = async (
     res.status(201).json({ message: `${kind} recorded successfully`, data: result });
   } catch (error) {
     if (error instanceof Error && error.message === "ACCOUNT_NOT_FOUND") {
-      res.status(404).json({ error: "Financial account not found" });
+      res.status(404).json({ code: "ACCOUNT_NOT_FOUND", error: "Financial account not found" });
       return;
     }
     if (error instanceof Error && error.message === "NEGATIVE_BALANCE") {
-      res.status(409).json({ error: "Credit cannot make outstanding balance negative" });
+      res.status(409).json({ code: "PAYMENT_EXCEEDS_BALANCE", error: "Credit cannot make outstanding balance negative" });
       return;
     }
     throw error;
@@ -265,6 +265,24 @@ export const recordAdjustment = async (
           },
         },
         include: { entries: true },
+      });
+      await tx.auditLog.create({
+        data: {
+          actorId: actor.id,
+          action: "FINANCIAL_ADJUSTMENT_RECORDED",
+          resourceType: "FinancialAccount",
+          resourceId: account.id,
+          outcome: "SUCCESS",
+          beforeData: { outstandingBalance: currentBalance },
+          afterData: { outstandingBalance: Number(updated.outstandingBalance) },
+          metadata: {
+            borrowerId: req.params.borrowerId,
+            amount,
+            direction,
+            reason,
+            transactionId: transaction.id,
+          },
+        },
       });
       return { transaction, outstandingBalance: updated.outstandingBalance };
     }, { isolationLevel: "Serializable" });

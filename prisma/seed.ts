@@ -1,4 +1,5 @@
 import { disconnectDB, prisma } from "../src/config/db.ts";
+import bcrypt from "bcryptjs";
 
 const authors = [
   { id: "00000000-0000-4000-8000-000000000201", name: "Robert C. Martin" },
@@ -168,7 +169,48 @@ const requireMappedId = (
 };
 
 const main = async (): Promise<void> => {
+  const staffCredentials = [
+    process.env.SEED_LIBRARIAN_PASSWORD
+      ? {
+          universityId: "LIB00001",
+          fullName: "Seed Librarian",
+          email: "librarian@unilib.local",
+          role: "LIBRARIAN" as const,
+          password: process.env.SEED_LIBRARIAN_PASSWORD,
+        }
+      : null,
+    process.env.SEED_ADMIN_PASSWORD
+      ? {
+          universityId: "ADM00001",
+          fullName: "Seed Administrator",
+          email: "admin@unilib.local",
+          role: "ADMIN" as const,
+          password: process.env.SEED_ADMIN_PASSWORD,
+        }
+      : null,
+  ].filter((item): item is NonNullable<typeof item> => item !== null);
+  const staffSeeds = await Promise.all(
+    staffCredentials.map(async ({ password, ...user }) => ({
+      ...user,
+      password_hash: await bcrypt.hash(password, 12),
+    })),
+  );
+
   await prisma.$transaction(async (tx) => {
+    for (const staff of staffSeeds) {
+      await tx.user.upsert({
+        where: { universityId: staff.universityId },
+        update: {
+          fullName: staff.fullName,
+          email: staff.email,
+          role: staff.role,
+          accountStatus: "ACTIVE",
+          password_hash: staff.password_hash,
+        },
+        create: staff,
+      });
+    }
+
     for (const author of authors) {
       await tx.author.upsert({
         where: { id: author.id },
@@ -246,6 +288,7 @@ const main = async (): Promise<void> => {
   });
 
   console.log(`Seeded ${books.length} books and 10 physical copies.`);
+  console.log(`Seeded ${staffSeeds.length} staff accounts from environment credentials.`);
   console.log(
     "Borrow test IDs: book=00000000-0000-4000-8000-000000000101 copy=00000000-0000-4000-8000-000000001001",
   );

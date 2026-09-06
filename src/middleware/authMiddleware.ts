@@ -37,6 +37,10 @@ export const authMiddleware: RequestHandler = async (req, res, next) => {
       res.status(401).json({ error: "User no longer exists" });
       return;
     }
+    if (user.accountStatus === "DISABLED") {
+      res.status(403).json({ code: "ACCOUNT_DISABLED", error: "Account is disabled" });
+      return;
+    }
 
     req.user = user;
     next();

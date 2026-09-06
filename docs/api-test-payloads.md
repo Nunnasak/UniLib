@@ -56,6 +56,13 @@ Authorization: Bearer {{token}}
 Content-Type: application/json
 ```
 
+Critical `POST` and `PATCH` operations also require a unique key. Reuse the same
+key only when retrying the exact same request:
+
+```text
+Idempotency-Key: {{$guid}}
+```
+
 The JWT cookie returned by the API can be used instead when the client maintains
 cookies automatically.
 
@@ -264,6 +271,161 @@ GET /books/search?category=databases&availability=AVAILABLE
 
 When testing cookie authentication, keep the `jwt` cookie from login so logout can
 clear it.
+
+## 19. Current user
+
+`GET /auth/me`
+
+GET requests have no body.
+
+## 20. Refresh access token
+
+`POST /auth/refresh`
+
+```json
+{
+  "refreshToken": "{{refreshToken}}"
+}
+```
+
+The server rotates the refresh token after every successful request.
+
+## 21. Librarian checkout for a borrower
+
+`POST /books/00000000-0000-4000-8000-000000000101/borrow`
+
+```json
+{
+  "copyId": "00000000-0000-4000-8000-000000001001",
+  "borrowerId": "{{borrowerId}}"
+}
+```
+
+Use `librarianToken` and an `Idempotency-Key`.
+
+## 22. Current loans and loan history
+
+```text
+GET /loans?status=ACTIVE&page=1&limit=20
+GET /loans?status=RETURNED&page=1&limit=20
+GET /loans?borrowerId={{borrowerId}}&page=1&limit=20
+```
+
+The `borrowerId` filter is Librarian-only. Borrowers always receive only their
+own records.
+
+## 23. Search users or borrowers
+
+`GET /users?q=example&page=1&limit=20`
+
+Admins can search all roles. Librarians receive only Student and Lecturer
+records.
+
+## 24. Admin creates a managed user
+
+`POST /users`
+
+```json
+{
+  "universityId": "LIB00002",
+  "fullName": "Second Librarian",
+  "email": "librarian2@example.com",
+  "password": "change-this-password",
+  "role": "LIBRARIAN"
+}
+```
+
+Use `adminToken` and an `Idempotency-Key`.
+
+## 25. Admin changes role or account status
+
+`PATCH /users/{{userId}}`
+
+```json
+{
+  "role": "LECTURER",
+  "accountStatus": "DISABLED"
+}
+```
+
+Use `adminToken` and an `Idempotency-Key`. Existing history is preserved.
+
+## 26. Admin views audit logs
+
+```text
+GET /audit-logs?page=1&limit=50
+GET /audit-logs?action=LOAN_RETURNED&page=1&limit=50
+GET /audit-logs?actorId={{userId}}&page=1&limit=50
+```
+
+## 27. Librarian creates catalog records
+
+`POST /catalog/authors`
+
+```json
+{ "name": "New Author" }
+```
+
+`POST /catalog/categories`
+
+```json
+{ "name": "Computer Science" }
+```
+
+`POST /catalog/books`
+
+```json
+{
+  "isbn13": "9781234567897",
+  "title": "Example Backend Book",
+  "description": "Catalog API example",
+  "publisher": "Example Press",
+  "publicationYear": 2026,
+  "languageCode": "en",
+  "authorIds": ["{{authorId}}"],
+  "categoryIds": ["{{categoryId}}"]
+}
+```
+
+`POST /catalog/copies`
+
+```json
+{
+  "bookId": "{{bookId}}",
+  "barcode": "EXAMPLE-0001",
+  "acquisitionPrice": 950.5,
+  "acquisitionDate": "2026-09-01"
+}
+```
+
+All catalog mutations require `librarianToken` and an `Idempotency-Key`.
+
+## 28. Librarian reports
+
+```text
+GET /reports/overdue?page=1&limit=20
+GET /reports/inventory?status=AVAILABLE&page=1&limit=20
+GET /reservations/books/{{bookId}}/queue
+```
+
+## 29. Admin system report
+
+`GET /reports/system-summary`
+
+Use `adminToken`. Admin does not automatically have librarian report or
+circulation permission.
+
+## Optional staff seed accounts
+
+Set secrets in `.env` before running `npm run db:seed`:
+
+```text
+SEED_LIBRARIAN_PASSWORD=your-local-secret
+SEED_ADMIN_PASSWORD=your-local-secret
+```
+
+The corresponding login identifiers are `LIB00001` and `ADM00001`. Seed
+passwords have no source-code defaults and are stored only as bcrypt hashes.
 
 ## Useful seeded book and copy IDs
 

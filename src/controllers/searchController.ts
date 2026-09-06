@@ -34,7 +34,7 @@ export const searchBooks = async (
 
   const availability = req.query.availability?.toUpperCase() ?? "ALL";
   if (availability !== "ALL" && availability !== "AVAILABLE" && availability !== "UNAVAILABLE") {
-    res.status(400).json({ error: "availability must be AVAILABLE, UNAVAILABLE, or ALL" });
+    res.status(400).json({ code: "INVALID_AVAILABILITY", error: "availability must be AVAILABLE, UNAVAILABLE, or ALL" });
     return;
   }
 

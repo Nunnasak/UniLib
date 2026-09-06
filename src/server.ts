@@ -9,7 +9,15 @@ import bookRoutes from "./routes/bookRoutes.ts";
 import loanRoutes from "./routes/loanRoutes.ts";
 import reservationRoutes from "./routes/reservationRoutes.ts";
 import financialRoutes from "./routes/financialRoutes.ts";
+import userRoutes, { auditRouter } from "./routes/userRoutes.ts";
+import catalogRoutes from "./routes/catalogRoutes.ts";
+import reportRoutes from "./routes/reportRoutes.ts";
 import { startReservationExpirationWorker } from "./services/reservationService.ts";
+import {
+  errorHandler,
+  normalizeErrorResponses,
+  notFoundHandler,
+} from "./middleware/errorResponseMiddleware.ts";
 
 const app = express();
 const port = getPort();
@@ -18,11 +26,18 @@ let isShuttingDown = false;
 
 app.use(express.json());
 app.use(cookieParser());
+app.use(normalizeErrorResponses);
 app.use("/auth", authRoutes);
 app.use("/books", bookRoutes);
 app.use("/loans", loanRoutes);
 app.use("/reservations", reservationRoutes);
 app.use("/financial-accounts", financialRoutes);
+app.use("/users", userRoutes);
+app.use("/audit-logs", auditRouter);
+app.use("/catalog", catalogRoutes);
+app.use("/reports", reportRoutes);
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 
 const startServer = async (): Promise<void> => {

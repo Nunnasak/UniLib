@@ -51,17 +51,15 @@ export const borrowBook = async (
   req: Request<BookParams>,
   res: Response,
 ): Promise<void> => {
-  const borrower = req.user;
-  if (!borrower) {
+  const actor = req.user;
+  if (!actor) {
     res.status(401).json({ error: "Not authorized" });
     return;
   }
-  if (borrower.accountStatus === "DISABLED") {
-    res.status(403).json({ error: "Account is disabled" });
-    return;
-  }
-  if (borrower.role !== "STUDENT" && borrower.role !== "LECTURER") {
-    res.status(403).json({ error: "Only students and lecturers can borrow books" });
+  const actorIsBorrower = actor.role === "STUDENT" || actor.role === "LECTURER";
+  const actorIsLibrarian = actor.role === "LIBRARIAN";
+  if (!actorIsBorrower && !actorIsLibrarian) {
+    res.status(403).json({ error: "Borrowing requires borrower or librarian permission" });
     return;
   }
   if (!hasCopyId(req.body)) {
@@ -71,6 +69,16 @@ export const borrowBook = async (
 
   const { bookId } = req.params;
   const copyId = req.body.copyId.trim();
+  const requestedBorrowerId =
+    typeof req.body === "object" && req.body !== null &&
+    typeof (req.body as Record<string, unknown>).borrowerId === "string"
+      ? (req.body as Record<string, unknown>).borrowerId as string
+      : undefined;
+  const borrowerId = actorIsBorrower ? actor.id : requestedBorrowerId?.trim();
+  if (!borrowerId) {
+    res.status(400).json({ error: "borrowerId is required for librarian checkout" });
+    return;
+  }
   const now = new Date();
   const borrowedOn = getBusinessDate(now);
   const dueOn = addCalendarDays(borrowedOn, STANDARD_LOAN_DAYS);
@@ -79,28 +87,32 @@ export const borrowBook = async (
 
   try {
     const loan = await prisma.$transaction(async (tx) => {
-      const [book, copy, activeLoanCount, sameBookLoan, overdueLoan, account, heldReservation] = await Promise.all([
+      const [borrower, book, copy, activeLoanCount, sameBookLoan, overdueLoan, account, heldReservation] = await Promise.all([
+        tx.user.findUnique({
+          where: { id: borrowerId },
+          select: { id: true, role: true, accountStatus: true },
+        }),
         tx.book.findUnique({ where: { id: bookId }, select: { id: true, isActive: true } }),
         tx.bookCopy.findUnique({
           where: { id: copyId },
           select: { id: true, bookId: true, status: true },
         }),
-        tx.loan.count({ where: { borrowerId: borrower.id, status: "ACTIVE" } }),
+        tx.loan.count({ where: { borrowerId, status: "ACTIVE" } }),
         tx.loan.findFirst({
-          where: { borrowerId: borrower.id, bookId, status: "ACTIVE" },
+          where: { borrowerId, bookId, status: "ACTIVE" },
           select: { id: true },
         }),
         tx.loan.findFirst({
-          where: { borrowerId: borrower.id, status: "ACTIVE", dueOn: { lt: borrowedOn } },
+          where: { borrowerId, status: "ACTIVE", dueOn: { lt: borrowedOn } },
           select: { id: true },
         }),
         tx.financialAccount.findUnique({
-          where: { borrowerId: borrower.id },
+          where: { borrowerId },
           select: { outstandingBalance: true },
         }),
         tx.reservation.findFirst({
           where: {
-            borrowerId: borrower.id,
+            borrowerId,
             bookId,
             allocatedCopyId: copyId,
             status: "HELD",
@@ -109,6 +121,10 @@ export const borrowBook = async (
         }),
       ]);
 
+      if (!borrower || (borrower.role !== "STUDENT" && borrower.role !== "LECTURER")) {
+        throw new Error("BORROWER_NOT_FOUND");
+      }
+      if (borrower.accountStatus === "DISABLED") throw new Error("ACCOUNT_DISABLED");
       if (!book || !book.isActive) throw new Error("BOOK_NOT_FOUND");
       if (!copy || copy.bookId !== bookId) throw new Error("COPY_NOT_FOUND");
       if (activeLoanCount >= ACTIVE_LOAN_LIMIT) throw new Error("ACTIVE_LOAN_LIMIT");
@@ -136,17 +152,34 @@ export const borrowBook = async (
         if (completed.count !== 1) throw new Error("RESERVATION_CHANGED");
       }
 
-      return tx.loan.create({
+      const loan = await tx.loan.create({
         data: {
-          borrowerId: borrower.id,
+          borrowerId,
           bookId,
           copyId,
-          checkedOutById: borrower.id,
+          checkedOutById: actor.id,
           borrowedAt: now,
           borrowedOn,
           dueOn,
         },
       });
+      await tx.auditLog.create({
+        data: {
+          actorId: actor.id,
+          action: "LOAN_CREATED",
+          resourceType: "Loan",
+          resourceId: loan.id,
+          outcome: "SUCCESS",
+          afterData: {
+            borrowerId,
+            bookId,
+            copyId,
+            borrowedOn: toDateOnly(borrowedOn),
+            dueOn: toDateOnly(dueOn),
+          },
+        },
+      });
+      return loan;
     }, { isolationLevel: "Serializable" });
 
     res.status(201).json({
@@ -161,6 +194,8 @@ export const borrowBook = async (
   } catch (error) {
     const messages: Record<string, [number, string]> = {
       BOOK_NOT_FOUND: [404, "Book not found"],
+      BORROWER_NOT_FOUND: [404, "Borrower not found"],
+      ACCOUNT_DISABLED: [403, "Borrower account is disabled"],
       COPY_NOT_FOUND: [404, "Copy not found for this book"],
       ACTIVE_LOAN_LIMIT: [409, "A borrower may have at most 5 active loans"],
       DUPLICATE_BOOK_LOAN: [409, "Borrower already has an active loan for this book"],
@@ -171,7 +206,7 @@ export const borrowBook = async (
     };
     const mapped = error instanceof Error ? messages[error.message] : undefined;
     if (mapped) {
-      res.status(mapped[0]).json({ error: mapped[1] });
+      res.status(mapped[0]).json({ code: (error as Error).message, error: mapped[1] });
       return;
     }
     if (isRetryableTransactionError(error)) {
@@ -191,6 +226,10 @@ export const renewLoan = async (
     res.status(401).json({ error: "Not authorized" });
     return;
   }
+  if (actor.role === "ADMIN") {
+    res.status(403).json({ error: "Administrators do not have circulation permission" });
+    return;
+  }
   const today = getBusinessDate();
 
   try {
@@ -207,7 +246,10 @@ export const renewLoan = async (
           },
         },
       });
-      if (!current || current.borrowerId !== actor.id) throw new Error("LOAN_NOT_FOUND");
+      const mayRenew =
+        current &&
+        (actor.role === "LIBRARIAN" || current.borrowerId === actor.id);
+      if (!current || !mayRenew) throw new Error("LOAN_NOT_FOUND");
       if (current.status !== "ACTIVE") throw new Error("LOAN_NOT_ACTIVE");
       if (current.dueOn.getTime() < today.getTime()) throw new Error("LOAN_OVERDUE");
       if (current.renewalCount >= MAX_RENEWALS) throw new Error("RENEWAL_LIMIT");
@@ -256,6 +298,17 @@ export const renewLoan = async (
           newDueOn,
         },
       });
+      await tx.auditLog.create({
+        data: {
+          actorId: actor.id,
+          action: "LOAN_RENEWED",
+          resourceType: "Loan",
+          resourceId: current.id,
+          outcome: "SUCCESS",
+          beforeData: { dueOn: toDateOnly(previousDueOn), renewalCount: current.renewalCount },
+          afterData: { dueOn: toDateOnly(newDueOn), renewalCount: sequence },
+        },
+      });
       return { id: current.id, dueOn: newDueOn, renewalCount: sequence };
     }, { isolationLevel: "Serializable" });
 
@@ -277,7 +330,7 @@ export const renewLoan = async (
     };
     const mapped = error instanceof Error ? messages[error.message] : undefined;
     if (mapped) {
-      res.status(mapped[0]).json({ error: mapped[1] });
+      res.status(mapped[0]).json({ code: (error as Error).message, error: mapped[1] });
       return;
     }
     if (isRetryableTransactionError(error)) {
@@ -297,7 +350,7 @@ export const returnLoan = async (
     res.status(401).json({ error: "Not authorized" });
     return;
   }
-  if (actor.role !== "LIBRARIAN" && actor.role !== "ADMIN") {
+  if (actor.role !== "LIBRARIAN") {
     res.status(403).json({ error: "Only a librarian can process a return" });
     return;
   }
@@ -376,6 +429,37 @@ export const returnLoan = async (
         });
       }
 
+      await tx.auditLog.create({
+        data: {
+          actorId: actor.id,
+          action: "LOAN_RETURNED",
+          resourceType: "Loan",
+          resourceId: current.id,
+          outcome: "SUCCESS",
+          beforeData: { status: current.status, copyStatus: "ON_LOAN" },
+          afterData: {
+            status: "RETURNED",
+            returnCondition,
+            lateFine,
+            damageCharge,
+            processingFee,
+            totalCharge,
+          },
+        },
+      });
+      if (returnCondition !== "NORMAL") {
+        await tx.auditLog.create({
+          data: {
+            actorId: actor.id,
+            action: "DAMAGE_ASSESSED",
+            resourceType: "Loan",
+            resourceId: current.id,
+            outcome: "SUCCESS",
+            metadata: { returnCondition, damageCharge, processingFee },
+          },
+        });
+      }
+
       return {
         ...current,
         status: "RETURNED" as const,
@@ -413,7 +497,7 @@ export const returnLoan = async (
     };
     const mapped = error instanceof Error ? messages[error.message] : undefined;
     if (mapped) {
-      res.status(mapped[0]).json({ error: mapped[1] });
+      res.status(mapped[0]).json({ code: (error as Error).message, error: mapped[1] });
       return;
     }
     if (isRetryableTransactionError(error)) {
@@ -433,7 +517,7 @@ export const confirmLoanLost = async (
     res.status(401).json({ error: "Not authorized" });
     return;
   }
-  if (actor.role !== "LIBRARIAN" && actor.role !== "ADMIN") {
+  if (actor.role !== "LIBRARIAN") {
     res.status(403).json({ error: "Only a librarian can confirm a lost copy" });
     return;
   }
@@ -485,6 +569,24 @@ export const confirmLoanLost = async (
           },
         },
       });
+      await tx.auditLog.create({
+        data: {
+          actorId: actor.id,
+          action: "LOAN_CONFIRMED_LOST",
+          resourceType: "Loan",
+          resourceId: current.id,
+          outcome: "SUCCESS",
+          beforeData: { status: current.status, copyStatus: "ON_LOAN" },
+          afterData: {
+            status: "LOST",
+            copyStatus: "LOST",
+            replacementCharge,
+            processingFee,
+            lateFine,
+            totalCharge,
+          },
+        },
+      });
 
       return { id: current.id, closedOn, replacementCharge, processingFee, lateFine, totalCharge };
     }, { isolationLevel: "Serializable" });
@@ -510,7 +612,7 @@ export const confirmLoanLost = async (
     };
     const mapped = error instanceof Error ? messages[error.message] : undefined;
     if (mapped) {
-      res.status(mapped[0]).json({ error: mapped[1] });
+      res.status(mapped[0]).json({ code: (error as Error).message, error: mapped[1] });
       return;
     }
     if (isRetryableTransactionError(error)) {
@@ -536,7 +638,7 @@ export const getLoan = async (
   });
   const canView =
     loan &&
-    (loan.borrowerId === actor.id || actor.role === "LIBRARIAN" || actor.role === "ADMIN");
+    (loan.borrowerId === actor.id || actor.role === "LIBRARIAN");
   if (!loan || !canView) {
     res.status(404).json({ error: "Loan not found" });
     return;
@@ -551,5 +653,59 @@ export const getLoan = async (
       closedOn: loan.closedOn ? toDateOnly(loan.closedOn) : null,
       accruedLateFine,
     },
+  });
+};
+
+export const listLoans = async (req: Request, res: Response): Promise<void> => {
+  const actor = req.user;
+  if (!actor) {
+    res.status(401).json({ error: "Not authorized" });
+    return;
+  }
+  if (actor.role === "ADMIN") {
+    res.status(403).json({ error: "Administrators do not have circulation-record permission" });
+    return;
+  }
+  const pageValue = typeof req.query.page === "string" ? Number(req.query.page) : 1;
+  const limitValue = typeof req.query.limit === "string" ? Number(req.query.limit) : 20;
+  const page = Number.isInteger(pageValue) && pageValue > 0 ? pageValue : 1;
+  const limit = Math.min(Number.isInteger(limitValue) && limitValue > 0 ? limitValue : 20, 100);
+  const status =
+    req.query.status === "ACTIVE" || req.query.status === "RETURNED" || req.query.status === "LOST"
+      ? req.query.status as "ACTIVE" | "RETURNED" | "LOST"
+      : undefined;
+  const borrowerId =
+    actor.role === "LIBRARIAN" && typeof req.query.borrowerId === "string"
+      ? req.query.borrowerId
+      : actor.role === "LIBRARIAN"
+        ? undefined
+        : actor.id;
+  const where = {
+    ...(borrowerId ? { borrowerId } : {}),
+    ...(status ? { status } : {}),
+  };
+  const [total, loans] = await prisma.$transaction([
+    prisma.loan.count({ where }),
+    prisma.loan.findMany({
+      where,
+      include: {
+        book: { select: { id: true, isbn13: true, title: true } },
+        copy: { select: { id: true, barcode: true, status: true } },
+        borrower: { select: { id: true, universityId: true, fullName: true } },
+      },
+      orderBy: [{ borrowedAt: "desc" }, { id: "desc" }],
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+  ]);
+  res.status(200).json({
+    data: loans.map((loan) => ({
+      ...loan,
+      borrowedOn: toDateOnly(loan.borrowedOn),
+      dueOn: toDateOnly(loan.dueOn),
+      closedOn: loan.closedOn ? toDateOnly(loan.closedOn) : null,
+      accruedLateFine: loan.status === "ACTIVE" ? calculateLateFine(loan.dueOn) : 0,
+    })),
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   });
 };
