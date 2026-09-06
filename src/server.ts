@@ -7,6 +7,9 @@ import { getPort } from "./config/env.ts";
 import authRoutes from "./routes/authRoute.ts";
 import bookRoutes from "./routes/bookRoutes.ts";
 import loanRoutes from "./routes/loanRoutes.ts";
+import reservationRoutes from "./routes/reservationRoutes.ts";
+import financialRoutes from "./routes/financialRoutes.ts";
+import { startReservationExpirationWorker } from "./services/reservationService.ts";
 
 const app = express();
 const port = getPort();
@@ -18,10 +21,13 @@ app.use(cookieParser());
 app.use("/auth", authRoutes);
 app.use("/books", bookRoutes);
 app.use("/loans", loanRoutes);
+app.use("/reservations", reservationRoutes);
+app.use("/financial-accounts", financialRoutes);
 
 
 const startServer = async (): Promise<void> => {
   await connectDB();
+  startReservationExpirationWorker();
 
   await new Promise<void>((resolve, reject) => {
     server = app.listen(port, (error?: Error) => {

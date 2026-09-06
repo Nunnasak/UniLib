@@ -2,14 +2,20 @@ import type { Request, Response } from "express";
 
 import { prisma } from "../config/db.ts";
 import {
+  allocateCopyToNextReservation,
+  processExpiredReservationHolds,
+} from "../services/reservationService.ts";
+import {
   addCalendarDays,
   calculateLateFine,
   getBusinessDate,
   toDateOnly,
 } from "../utils/businessDate.ts";
+import { calculateDamageCharges, roundMoney } from "../utils/money.ts";
 
 type BookParams = { bookId: string };
 type LoanParams = { loanId: string };
+type ReturnCondition = "NORMAL" | "MINOR_DAMAGE" | "MAJOR_DAMAGE" | "UNUSABLE";
 
 const ACTIVE_LOAN_LIMIT = 5;
 const STANDARD_LOAN_DAYS = 14;
@@ -21,6 +27,18 @@ const hasCopyId = (body: unknown): body is { copyId: string } => {
   if (typeof body !== "object" || body === null) return false;
   const copyId = (body as Record<string, unknown>).copyId;
   return typeof copyId === "string" && copyId.trim().length > 0;
+};
+
+const getReturnCondition = (body: unknown): ReturnCondition | null => {
+  if (typeof body !== "object" || body === null) return null;
+  const candidate = body as Record<string, unknown>;
+  const condition = candidate.returnCondition ?? candidate.condition;
+  return condition === "NORMAL" ||
+    condition === "MINOR_DAMAGE" ||
+    condition === "MAJOR_DAMAGE" ||
+    condition === "UNUSABLE"
+    ? condition
+    : null;
 };
 
 const isRetryableTransactionError = (error: unknown): boolean =>
@@ -57,9 +75,11 @@ export const borrowBook = async (
   const borrowedOn = getBusinessDate(now);
   const dueOn = addCalendarDays(borrowedOn, STANDARD_LOAN_DAYS);
 
+  await processExpiredReservationHolds(now);
+
   try {
     const loan = await prisma.$transaction(async (tx) => {
-      const [book, copy, activeLoanCount, sameBookLoan] = await Promise.all([
+      const [book, copy, activeLoanCount, sameBookLoan, overdueLoan, account, heldReservation] = await Promise.all([
         tx.book.findUnique({ where: { id: bookId }, select: { id: true, isActive: true } }),
         tx.bookCopy.findUnique({
           where: { id: copyId },
@@ -70,19 +90,51 @@ export const borrowBook = async (
           where: { borrowerId: borrower.id, bookId, status: "ACTIVE" },
           select: { id: true },
         }),
+        tx.loan.findFirst({
+          where: { borrowerId: borrower.id, status: "ACTIVE", dueOn: { lt: borrowedOn } },
+          select: { id: true },
+        }),
+        tx.financialAccount.findUnique({
+          where: { borrowerId: borrower.id },
+          select: { outstandingBalance: true },
+        }),
+        tx.reservation.findFirst({
+          where: {
+            borrowerId: borrower.id,
+            bookId,
+            allocatedCopyId: copyId,
+            status: "HELD",
+            holdExpiresAt: { gt: now },
+          },
+        }),
       ]);
 
       if (!book || !book.isActive) throw new Error("BOOK_NOT_FOUND");
       if (!copy || copy.bookId !== bookId) throw new Error("COPY_NOT_FOUND");
       if (activeLoanCount >= ACTIVE_LOAN_LIMIT) throw new Error("ACTIVE_LOAN_LIMIT");
       if (sameBookLoan) throw new Error("DUPLICATE_BOOK_LOAN");
-      if (copy.status !== "AVAILABLE") throw new Error("COPY_NOT_AVAILABLE");
+      if (overdueLoan) throw new Error("OVERDUE_LOAN");
+      if (Number(account?.outstandingBalance ?? 0) >= RENEWAL_FINE_LIMIT) {
+        throw new Error("OUTSTANDING_FINE");
+      }
+
+      const isAvailable = copy.status === "AVAILABLE";
+      const isHeldForBorrower = copy.status === "ON_HOLD" && heldReservation !== null;
+      if (!isAvailable && !isHeldForBorrower) throw new Error("COPY_NOT_AVAILABLE");
 
       const claimed = await tx.bookCopy.updateMany({
-        where: { id: copyId, bookId, status: "AVAILABLE" },
+        where: { id: copyId, bookId, status: isAvailable ? "AVAILABLE" : "ON_HOLD" },
         data: { status: "ON_LOAN" },
       });
       if (claimed.count !== 1) throw new Error("COPY_NOT_AVAILABLE");
+
+      if (heldReservation) {
+        const completed = await tx.reservation.updateMany({
+          where: { id: heldReservation.id, status: "HELD", allocatedCopyId: copyId },
+          data: { status: "COMPLETED", completedAt: now },
+        });
+        if (completed.count !== 1) throw new Error("RESERVATION_CHANGED");
+      }
 
       return tx.loan.create({
         data: {
@@ -112,7 +164,10 @@ export const borrowBook = async (
       COPY_NOT_FOUND: [404, "Copy not found for this book"],
       ACTIVE_LOAN_LIMIT: [409, "A borrower may have at most 5 active loans"],
       DUPLICATE_BOOK_LOAN: [409, "Borrower already has an active loan for this book"],
+      OVERDUE_LOAN: [409, "An overdue loan prevents new borrowing"],
+      OUTSTANDING_FINE: [409, "Outstanding balance of 500 baht or more prevents borrowing"],
       COPY_NOT_AVAILABLE: [409, "Copy is not available"],
+      RESERVATION_CHANGED: [409, "Reservation state changed; please retry"],
     };
     const mapped = error instanceof Error ? messages[error.message] : undefined;
     if (mapped) {
@@ -165,7 +220,7 @@ export const renewLoan = async (
         tx.reservation.findFirst({
           where: {
             bookId: current.bookId,
-            status: "QUEUED",
+            status: { in: ["QUEUED", "HELD"] },
             borrowerId: { not: current.borrowerId },
           },
           select: { id: true },
@@ -242,19 +297,35 @@ export const returnLoan = async (
     res.status(401).json({ error: "Not authorized" });
     return;
   }
+  if (actor.role !== "LIBRARIAN" && actor.role !== "ADMIN") {
+    res.status(403).json({ error: "Only a librarian can process a return" });
+    return;
+  }
+  const returnCondition = getReturnCondition(req.body);
+  if (!returnCondition) {
+    res.status(400).json({
+      error: "condition must be NORMAL, MINOR_DAMAGE, MAJOR_DAMAGE, or UNUSABLE",
+    });
+    return;
+  }
   const now = new Date();
   const closedOn = getBusinessDate(now);
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const current = await tx.loan.findUnique({ where: { id: req.params.loanId } });
-      const canClose =
-        current &&
-        (current.borrowerId === actor.id || actor.role === "LIBRARIAN" || actor.role === "ADMIN");
-      if (!current || !canClose) throw new Error("LOAN_NOT_FOUND");
+      const current = await tx.loan.findUnique({
+        where: { id: req.params.loanId },
+        include: { copy: { select: { acquisitionPrice: true } } },
+      });
+      if (!current) throw new Error("LOAN_NOT_FOUND");
       if (current.status !== "ACTIVE") throw new Error("LOAN_NOT_ACTIVE");
 
       const lateFine = calculateLateFine(current.dueOn, now);
+      const { damageCharge, processingFee } = calculateDamageCharges(
+        Number(current.copy.acquisitionPrice),
+        returnCondition,
+      );
+      const totalCharge = roundMoney(lateFine + damageCharge + processingFee);
       const closed = await tx.loan.updateMany({
         where: { id: current.id, status: "ACTIVE" },
         data: {
@@ -262,42 +333,60 @@ export const returnLoan = async (
           closedAt: now,
           closedOn,
           closedById: actor.id,
-          returnCondition: "NORMAL",
+          returnCondition,
         },
       });
       if (closed.count !== 1) throw new Error("LOAN_CHANGED");
 
-      await tx.bookCopy.update({
-        where: { id: current.copyId },
-        data: { status: "AVAILABLE" },
-      });
+      if (returnCondition === "NORMAL") {
+        await allocateCopyToNextReservation(tx, current.bookId, current.copyId, now);
+      } else {
+        await tx.bookCopy.update({
+          where: { id: current.copyId },
+          data: { status: returnCondition === "UNUSABLE" ? "RETIRED" : "MAINTENANCE" },
+        });
+      }
 
-      if (lateFine > 0) {
+      if (totalCharge > 0) {
         const account = await tx.financialAccount.upsert({
           where: { borrowerId: current.borrowerId },
-          create: { borrowerId: current.borrowerId, outstandingBalance: lateFine },
-          update: { outstandingBalance: { increment: lateFine } },
+          create: { borrowerId: current.borrowerId, outstandingBalance: totalCharge },
+          update: { outstandingBalance: { increment: totalCharge } },
         });
+        const entries = [
+          ...(lateFine > 0
+            ? [{ loanId: current.id, component: "LATE_FINE" as const, direction: "DEBIT" as const, amount: lateFine }]
+            : []),
+          ...(damageCharge > 0
+            ? [{ loanId: current.id, component: "DAMAGE_CHARGE" as const, direction: "DEBIT" as const, amount: damageCharge }]
+            : []),
+          ...(processingFee > 0
+            ? [{ loanId: current.id, component: "PROCESSING_FEE" as const, direction: "DEBIT" as const, amount: processingFee }]
+            : []),
+        ];
         await tx.financialTransaction.create({
           data: {
             accountId: account.id,
             createdById: actor.id,
             type: "RETURN_CHARGE",
-            sourceKey: `loan:${current.id}:late-fine`,
-            reason: "Late return fine",
-            entries: {
-              create: {
-                loanId: current.id,
-                component: "LATE_FINE",
-                direction: "DEBIT",
-                amount: lateFine,
-              },
-            },
+            sourceKey: `loan:${current.id}:return-charge`,
+            reason: `Return charge (${returnCondition})`,
+            entries: { create: entries },
           },
         });
       }
 
-      return { ...current, status: "RETURNED" as const, closedAt: now, closedOn, lateFine };
+      return {
+        ...current,
+        status: "RETURNED" as const,
+        returnCondition,
+        closedAt: now,
+        closedOn,
+        lateFine,
+        damageCharge,
+        processingFee,
+        totalCharge,
+      };
     }, { isolationLevel: "Serializable" });
 
     res.status(200).json({
@@ -308,6 +397,109 @@ export const returnLoan = async (
         dueOn: toDateOnly(result.dueOn),
         closedOn: toDateOnly(result.closedOn),
         accruedLateFine: result.lateFine,
+        charges: {
+          lateFine: result.lateFine,
+          damageCharge: result.damageCharge,
+          processingFee: result.processingFee,
+          total: result.totalCharge,
+        },
+      },
+    });
+  } catch (error) {
+    const messages: Record<string, [number, string]> = {
+      LOAN_NOT_FOUND: [404, "Loan not found"],
+      LOAN_NOT_ACTIVE: [409, "Loan has already been closed"],
+      LOAN_CHANGED: [409, "Loan state changed; please retry"],
+    };
+    const mapped = error instanceof Error ? messages[error.message] : undefined;
+    if (mapped) {
+      res.status(mapped[0]).json({ error: mapped[1] });
+      return;
+    }
+    if (isRetryableTransactionError(error)) {
+      res.status(409).json({ error: "Loan state changed; please retry" });
+      return;
+    }
+    throw error;
+  }
+};
+
+export const confirmLoanLost = async (
+  req: Request<LoanParams>,
+  res: Response,
+): Promise<void> => {
+  const actor = req.user;
+  if (!actor) {
+    res.status(401).json({ error: "Not authorized" });
+    return;
+  }
+  if (actor.role !== "LIBRARIAN" && actor.role !== "ADMIN") {
+    res.status(403).json({ error: "Only a librarian can confirm a lost copy" });
+    return;
+  }
+
+  const now = new Date();
+  const closedOn = getBusinessDate(now);
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const current = await tx.loan.findUnique({
+        where: { id: req.params.loanId },
+        include: { copy: { select: { acquisitionPrice: true } } },
+      });
+      if (!current) throw new Error("LOAN_NOT_FOUND");
+      if (current.status !== "ACTIVE") throw new Error("LOAN_NOT_ACTIVE");
+
+      const lateFine = calculateLateFine(current.dueOn, now);
+      const replacementCharge = roundMoney(Number(current.copy.acquisitionPrice));
+      const processingFee = 200;
+      const totalCharge = roundMoney(replacementCharge + processingFee + lateFine);
+
+      const closed = await tx.loan.updateMany({
+        where: { id: current.id, status: "ACTIVE" },
+        data: { status: "LOST", closedAt: now, closedOn, closedById: actor.id },
+      });
+      if (closed.count !== 1) throw new Error("LOAN_CHANGED");
+      await tx.bookCopy.update({ where: { id: current.copyId }, data: { status: "LOST" } });
+
+      const account = await tx.financialAccount.upsert({
+        where: { borrowerId: current.borrowerId },
+        create: { borrowerId: current.borrowerId, outstandingBalance: totalCharge },
+        update: { outstandingBalance: { increment: totalCharge } },
+      });
+      await tx.financialTransaction.create({
+        data: {
+          accountId: account.id,
+          createdById: actor.id,
+          type: "LOST_CHARGE",
+          sourceKey: `loan:${current.id}:lost-charge`,
+          reason: "Lost copy charge",
+          entries: {
+            create: [
+              { loanId: current.id, component: "LOST_REPLACEMENT", direction: "DEBIT", amount: replacementCharge },
+              { loanId: current.id, component: "PROCESSING_FEE", direction: "DEBIT", amount: processingFee },
+              ...(lateFine > 0
+                ? [{ loanId: current.id, component: "LATE_FINE" as const, direction: "DEBIT" as const, amount: lateFine }]
+                : []),
+            ],
+          },
+        },
+      });
+
+      return { id: current.id, closedOn, replacementCharge, processingFee, lateFine, totalCharge };
+    }, { isolationLevel: "Serializable" });
+
+    res.status(200).json({
+      message: "Lost copy confirmed",
+      data: {
+        ...result,
+        closedOn: toDateOnly(result.closedOn),
+        charges: {
+          replacementCharge: result.replacementCharge,
+          processingFee: result.processingFee,
+          lateFine: result.lateFine,
+          total: result.totalCharge,
+        },
       },
     });
   } catch (error) {
@@ -338,7 +530,10 @@ export const getLoan = async (
     res.status(401).json({ error: "Not authorized" });
     return;
   }
-  const loan = await prisma.loan.findUnique({ where: { id: req.params.loanId } });
+  const loan = await prisma.loan.findUnique({
+    where: { id: req.params.loanId },
+    include: { ledgerEntries: true },
+  });
   const canView =
     loan &&
     (loan.borrowerId === actor.id || actor.role === "LIBRARIAN" || actor.role === "ADMIN");
