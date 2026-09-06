@@ -5,6 +5,8 @@ import cookieParser from "cookie-parser";
 import { connectDB, disconnectDB } from "./config/db.ts";
 import { getPort } from "./config/env.ts";
 import authRoutes from "./routes/authRoute.ts";
+import bookRoutes from "./routes/bookRoutes.ts";
+import loanRoutes from "./routes/loanRoutes.ts";
 
 const app = express();
 const port = getPort();
@@ -14,6 +16,8 @@ let isShuttingDown = false;
 app.use(express.json());
 app.use(cookieParser());
 app.use("/auth", authRoutes);
+app.use("/books", bookRoutes);
+app.use("/loans", loanRoutes);
 
 
 const startServer = async (): Promise<void> => {
