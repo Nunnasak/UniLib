@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon --exec node --env-file=.env ./src/server.ts",
+    "dev": "concurrently --kill-others-on-fail --names api,studio --prefix-colors cyan,magenta \"npm:dev:server\" \"npm:studio\"",
+    "dev:server": "nodemon --exec node --env-file=.env ./src/server.ts",
+    "studio": "prisma studio",
     "db:seed": "prisma db seed",
     "typecheck": "tsc --noEmit",
     "postinstall": "prisma skills sync || exit 0"
@@ -27,6 +29,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.4.0",
     "@types/pg": "^8.23.1",
+    "concurrently": "^10.0.5",
     "nodemon": "^3.1.14",
     "prisma": "^7.10.0",
     "typescript": "^7.0.2"
