@@ -25,6 +25,12 @@ enum AccountStatus {
     DISABLED
 }
 
+enum IdempotencyStatus {
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
 model User {
     id            String        @id @default(uuid())
     universityId  String        @unique @db.VarChar(255)
@@ -36,31 +42,352 @@ model User {
     createAt      DateTime      @default(now()) @db.Timestamptz(3)
     updateAt      DateTime      @updatedAt @db.Timestamptz(3)
 
-    borrowRecords BorrowRecord[]
+    authSessions                 AuthSession[]
+    borrowedLoans                Loan[]                 @relation("BorrowerLoans")
+    processedCheckouts           Loan[]                 @relation("ProcessedCheckouts")
+    processedLoanClosures        Loan[]                 @relation("ProcessedLoanClosures")
+    processedRenewals            LoanRenewal[]
+    reservations                 Reservation[]
+    financialAccount             FinancialAccount?
+    createdFinancialTransactions FinancialTransaction[]
+    idempotencyRequests          IdempotencyRequest[]
+    auditLogs                    AuditLog[]
 
     @@index([role, accountStatus])
 }
 
-model Book {
-    id       String   @id @default(uuid())
-    title    String
-    author   String
-    types    String[]
-    status   String   @default("AVAILABLE")
-    createAt DateTime @default(now())
+model AuthSession {
+    id               String    @id @default(uuid()) @db.Uuid
+    userId           String    @db.Uuid
+    refreshTokenHash String    @unique @db.VarChar(255)
+    expiresAt        DateTime  @db.Timestamptz(3)
+    revokedAt        DateTime? @db.Timestamptz(3)
+    lastUsedAt       DateTime? @db.Timestamptz(3)
+    createdAt        DateTime  @default(now()) @db.Timestamptz(3)
 
-    borrowRecords BorrowRecord[]
+    user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+    @@index([userId, expiresAt])
+    @@map("auth_sessions")
 }
 
-model BorrowRecord {
-    id         String    @id @default(uuid())
-    borrowDate DateTime  @default(now())
-    dueDate    DateTime
-    returnDate DateTime?
+enum CopyStatus {
+  AVAILABLE
+  ON_LOAN
+  ON_HOLD
+  MAINTENANCE
+  LOST
+  RETIRED
+}
 
-    userId String
-    user   User   @relation(fields: [userId], references: [id])
+model Book {
+    id              String   @id @default(uuid()) @db.Uuid
+    isbn13          String   @unique @db.VarChar(13)
+    title           String   @db.VarChar(500)
+    description     String?  @db.Text
+    publisher       String   @db.VarChar(255)
+    publicationYear Int
+    languageCode    String   @db.VarChar(10)
+    isActive        Boolean  @default(true)
+    createdAt       DateTime @default(now()) @db.Timestamptz(3)
+    updatedAt       DateTime @updatedAt @db.Timestamptz(3)
 
-    bookId String
-    book   Book   @relation(fields: [bookId], references: [id])
+    authors      BookAuthor[]
+    categories   BookCategory[]
+    copies       BookCopy[]
+    loans        Loan[]
+    reservations Reservation[]
+
+    @@index([title])
+    @@index([isActive])
+    @@map("users")
+}
+
+model Author {
+    id        String   @id @default(uuid()) @db.Uuid
+    name      String   @db.VarChar(255)
+    createdAt DateTime @default(now()) @db.Timestamptz(3)
+    updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+    books BookAuthor[]
+
+    @@index([name])
+    @@map("authors")
+}
+
+model BookAuthor {
+    bookId   String @db.Uuid
+    authorId String @db.Uuid
+    position Int    @default(0)
+
+    book   Book   @relation(fields: [bookId], references: [id], onDelete: Cascade)
+    author Author @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+    @@id([bookId, authorId])
+    @@unique([bookId, position])
+    @@index([authorId, bookId])
+    @@map("book_authors")
+}
+
+model Category {
+    id        String   @id @default(uuid()) @db.Uuid
+    name      String   @unique @db.VarChar(150)
+    createdAt DateTime @default(now()) @db.Timestamptz(3)
+    updatedAt DateTime @updatedAt @db.Timestamptz(3)
+
+    books BookCategory[]
+
+    @@map("categories")
+}
+
+model BookCategory {
+    bookId     String @db.Uuid
+    categoryId String @db.Uuid
+
+    book     Book     @relation(fields: [bookId], references: [id], onDelete: Cascade)
+    category Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+    @@id([bookId, categoryId])
+    @@index([categoryId, bookId])
+    @@map("book_categories")
+}
+
+model BookCopy {
+    id               String     @id @default(uuid()) @db.Uuid
+    bookId           String     @db.Uuid
+    barcode          String     @unique @db.VarChar(100)
+    acquisitionPrice Decimal    @db.Decimal(12, 2)
+    acquisitionDate  DateTime   @db.Date
+    status           CopyStatus @default(AVAILABLE)
+    createdAt        DateTime   @default(now()) @db.Timestamptz(3)
+    updatedAt        DateTime   @updatedAt @db.Timestamptz(3)
+
+    book                  Book          @relation(fields: [bookId], references: [id], onDelete: Restrict)
+    loans                 Loan[]
+    allocatedReservations Reservation[]
+
+    // Enables composite foreign keys that guarantee a loan/hold is for this book.
+    @@unique([id, bookId])
+    @@index([bookId, status])
+    @@index([status])
+    @@map("book_copies")
+}
+
+enum LoanStatus {
+    ACTIVE
+    RETURNED
+    LOST
+}
+
+enum ReturnCondition {
+    NORMAL
+    MINOR_DAMAGE
+    MAJOR_DAMAGE
+    UNUSABLE
+}
+
+model Loan {
+    id              String           @id @default(uuid()) @db.Uuid
+    borrowerId      String           @db.Uuid
+    bookId          String           @db.Uuid
+    copyId          String           @db.Uuid
+    checkedOutById  String           @db.Uuid
+    closedById      String?          @db.Uuid
+    status          LoanStatus       @default(ACTIVE)
+    borrowedAt      DateTime         @default(now()) @db.Timestamptz(3)
+    borrowedOn      DateTime         @db.Date
+    dueOn           DateTime         @db.Date
+    closedAt        DateTime?        @db.Timestamptz(3)
+    closedOn        DateTime?        @db.Date
+    returnCondition ReturnCondition?
+    renewalCount    Int              @default(0)
+    createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+    updatedAt       DateTime         @updatedAt @db.Timestamptz(3)
+
+    borrower      User             @relation("BorrowerLoans", fields: [borrowerId], references: [id], onDelete: Restrict)
+    checkedOutBy  User             @relation("ProcessedCheckouts", fields: [checkedOutById], references: [id], onDelete: Restrict)
+    closedBy      User?            @relation("ProcessedLoanClosures", fields: [closedById], references: [id], onDelete: Restrict)
+    book          Book             @relation(fields: [bookId], references: [id], onDelete: Restrict)
+    copy          BookCopy         @relation(fields: [copyId, bookId], references: [id, bookId], onDelete: Restrict)
+    renewals      LoanRenewal[]
+    ledgerEntries FinancialEntry[]
+
+    @@index([borrowerId, status, dueOn])
+    @@index([status, dueOn])
+    @@index([bookId, status])
+    @@index([copyId, status])
+    @@map("loans")
+}
+
+model LoanRenewal {
+    id            String   @id @default(uuid()) @db.Uuid
+    loanId        String   @db.Uuid
+    renewedById   String   @db.Uuid
+    sequence      Int
+    previousDueOn DateTime @db.Date
+    newDueOn      DateTime @db.Date
+    createdAt     DateTime @default(now()) @db.Timestamptz(3)
+
+    loan      Loan @relation(fields: [loanId], references: [id], onDelete: Restrict)
+    renewedBy User @relation(fields: [renewedById], references: [id], onDelete: Restrict)
+
+    @@unique([loanId, sequence])
+    @@index([renewedById, createdAt])
+    @@map("loan_renewals")
+}
+
+enum ReservationStatus {
+    QUEUED
+    HELD
+    COMPLETED
+    CANCELLED
+    EXPIRED
+    }
+
+model Reservation {
+    id              String            @id @default(uuid()) @db.Uuid
+    borrowerId      String            @db.Uuid
+    bookId          String            @db.Uuid
+    allocatedCopyId String?           @db.Uuid
+    status          ReservationStatus @default(QUEUED)
+    allocatedAt     DateTime?         @db.Timestamptz(3)
+    holdExpiresAt   DateTime?         @db.Timestamptz(3)
+    completedAt     DateTime?         @db.Timestamptz(3)
+    cancelledAt     DateTime?         @db.Timestamptz(3)
+    expiredAt       DateTime?         @db.Timestamptz(3)
+    createdAt       DateTime          @default(now()) @db.Timestamptz(3)
+    updatedAt       DateTime          @updatedAt @db.Timestamptz(3)
+
+    borrower      User      @relation(fields: [borrowerId], references: [id], onDelete: Restrict)
+    book          Book      @relation(fields: [bookId], references: [id], onDelete: Restrict)
+    allocatedCopy BookCopy? @relation(fields: [allocatedCopyId, bookId], references: [id, bookId], onDelete: Restrict)
+
+    // createdAt + id is the deterministic FIFO queue order.
+    @@index([bookId, status, createdAt, id])
+    @@index([borrowerId, status])
+    @@index([status, holdExpiresAt])
+    @@index([allocatedCopyId, status])
+    @@map("reservations")
+}
+
+enum FinancialTransactionType {
+  RETURN_CHARGE
+  LOST_CHARGE
+  PAYMENT
+  WAIVER
+  ADJUSTMENT
+}
+
+enum LedgerComponent {
+  LATE_FINE
+  LOST_REPLACEMENT
+  PROCESSING_FEE
+  DAMAGE_CHARGE
+  PAYMENT
+  WAIVER
+  ADJUSTMENT
+}
+
+enum LedgerDirection {
+  DEBIT
+  CREDIT
+}
+
+model FinancialAccount {
+  id                 String   @id @default(uuid()) @db.Uuid
+  borrowerId         String   @unique @db.Uuid
+  outstandingBalance Decimal  @default(0) @db.Decimal(12, 2)
+  createdAt          DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime @updatedAt @db.Timestamptz(3)
+
+  borrower     User                   @relation(fields: [borrowerId], references: [id], onDelete: Restrict)
+  transactions FinancialTransaction[]
+
+  @@index([outstandingBalance])
+  @@map("financial_accounts")
+}
+
+model FinancialTransaction {
+  id                String                   @id @default(uuid()) @db.Uuid
+  accountId         String                   @db.Uuid
+  createdById       String?                  @db.Uuid
+  type              FinancialTransactionType
+  sourceKey         String                   @unique @db.VarChar(255)
+  reason            String?                  @db.Text
+  externalReference String?                  @db.VarChar(255)
+  createdAt         DateTime                 @default(now()) @db.Timestamptz(3)
+
+  account   FinancialAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  createdBy User?            @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  entries   FinancialEntry[]
+
+  @@index([accountId, createdAt])
+  @@index([createdById, createdAt])
+  @@map("financial_transactions")
+}
+
+model FinancialEntry {
+  id            String          @id @default(uuid()) @db.Uuid
+  transactionId String          @db.Uuid
+  loanId        String?         @db.Uuid
+  component     LedgerComponent
+  direction     LedgerDirection
+  amount        Decimal         @db.Decimal(12, 2)
+  createdAt     DateTime        @default(now()) @db.Timestamptz(3)
+
+  transaction FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  loan        Loan?                @relation(fields: [loanId], references: [id], onDelete: Restrict)
+
+  @@index([transactionId])
+  @@index([loanId, component])
+  @@map("financial_entries")
+}
+
+model IdempotencyRequest {
+  id             String            @id @default(uuid()) @db.Uuid
+  actorId        String            @db.Uuid
+  operation      String            @db.VarChar(100)
+  idempotencyKey String            @db.VarChar(255)
+  requestHash    String            @db.VarChar(128)
+  status         IdempotencyStatus @default(PROCESSING)
+  responseStatus Int?
+  responseBody   Json?             @db.JsonB
+  resourceId     String?           @db.VarChar(255)
+  expiresAt      DateTime          @db.Timestamptz(3)
+  createdAt      DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime          @updatedAt @db.Timestamptz(3)
+
+  actor User @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@unique([actorId, operation, idempotencyKey])
+  @@index([expiresAt])
+  @@map("idempotency_requests")
+}
+
+enum AuditOutcome {
+  SUCCESS
+  DENIED
+  FAILED
+}
+
+model AuditLog {
+  id           String       @id @default(uuid()) @db.Uuid
+  actorId      String?      @db.Uuid
+  action       String       @db.VarChar(100)
+  resourceType String       @db.VarChar(100)
+  resourceId   String       @db.VarChar(255)
+  outcome      AuditOutcome
+  requestId    String?      @db.VarChar(255)
+  beforeData   Json?        @db.JsonB
+  afterData    Json?        @db.JsonB
+  metadata     Json?        @db.JsonB
+  occurredAt   DateTime     @default(now()) @db.Timestamptz(3)
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([actorId, occurredAt])
+  @@index([resourceType, resourceId, occurredAt])
+  @@index([action, occurredAt])
+  @@index([requestId])
+  @@map("audit_logs")
 }
