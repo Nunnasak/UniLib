@@ -8,6 +8,7 @@ export default defineConfig({
 
   migrations: {
     path: "prisma/migrations",
+    seed: "node --env-file=.env prisma/seed.ts",
   },
 
   datasource: {
